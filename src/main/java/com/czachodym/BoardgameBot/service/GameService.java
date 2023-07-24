@@ -1,22 +1,20 @@
 package com.czachodym.BoardgameBot.service;
 
 import com.czachodym.BoardgameBot.enumeration.Site;
-import com.czachodym.BoardgameBot.exception.NoSiteException;
 import com.czachodym.BoardgameBot.model.Game;
 import com.czachodym.BoardgameBot.repository.GameRepository;
+import com.czachodym.BoardgameBot.service.sites.BoardGameService;
 import com.czachodym.BoardgameBot.service.sites.BoardgamecoreService;
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
+import com.czachodym.BoardgameBot.service.sites.RallythetroopsService;
 import lombok.extern.slf4j.Slf4j;
 import net.dv8tion.jda.api.JDA;
 import org.springframework.stereotype.Service;
 
-import java.util.*;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 
 @Service
@@ -25,23 +23,25 @@ public class GameService {
     private final GameRepository gameRepository;
     private final JDA jda;
     private final BoardgamecoreService boardgamecoreService;
+    private final RallythetroopsService rallythetroopsService;
 
 
-    public GameService(GameRepository gameRepository, JDA jda, BoardgamecoreService boardgamecoreService){
+    public GameService(GameRepository gameRepository, JDA jda, BoardgamecoreService boardgamecoreService, RallythetroopsService rallythetroopsService){
         this.gameRepository = gameRepository;
         this.jda = jda;
         this.boardgamecoreService = boardgamecoreService;
+        this.rallythetroopsService = rallythetroopsService;
     }
 
     public Game addGame(Game game){
         return gameRepository.save(game);
     }
 
-    public Optional<Game> getByUrlAndChannelId(String url, long channelId){
+    public Optional<Game> getByUrlAndChannelId(URL url, long channelId){
         return gameRepository.findByUrlAndChannelId(url, channelId);
     }
 
-    public Optional<Game> deleteByUrl(String url, long channelId){
+    public Optional<Game> deleteByUrl(URL url, long channelId){
         Optional<Game> game = getByUrlAndChannelId(url, channelId);
         game.ifPresent(gameRepository::delete);
         return game;
@@ -49,40 +49,23 @@ public class GameService {
 
     public void checkGames(){
         for(Game game: gameRepository.findAll()){
-            List<String> newActivePlayers = getActivePlayers(game.getSite(), game.getUrl());
+            BoardGameService service = getService(game.getSite());
+            List<String> newActivePlayers = service.getActivePlayers(game.getUrl(), game.getPlayersGameMapping());
             List<String> currentActivePlayers = game.getCurrentActivePlayers();
-            List<String> playersToNotify = getPlayersToNotify(newActivePlayers, currentActivePlayers, game.getPlayersMapping());
-            notifyPlayers(game.getChannelId(), game.getUrl(), playersToNotify);
+            List<String> playersToNotify = getPlayersToNotify(newActivePlayers, currentActivePlayers, game.getPlayersDiscordMapping());
+            URL notifyUrl = service.getNotifyUrl(game.getUrl(), game.getPlayersGameMapping(), game.getPlayersDiscordMapping(),
+                    playersToNotify);
+            notifyPlayers(game.getChannelId(), notifyUrl, playersToNotify);
             game.setCurrentActivePlayers(newActivePlayers);
             gameRepository.save(game);
         }
     }
 
-
-    public List<String> validatePlayers(String url, Site site, Map<String, String> playerMapping){
-        switch(site){
-            case BOARDGAMECORE -> {
-                List<String> allPlayers = boardgamecoreService.getAllPlayers(url);
-                Set<String> registeredPlayers = playerMapping.keySet();
-                List<String> notFoundPlayers = new ArrayList<>();
-                for(String rp: registeredPlayers){
-                    if(!allPlayers.contains(rp)){
-                        notFoundPlayers.add(rp);
-                    }
-                }
-                return notFoundPlayers;
-            }
-            default -> throw new NoSiteException(site);
-        }
-    }
-
-    private List<String> getActivePlayers(Site site, String url){
-        switch (site){
-            case BOARDGAMECORE:
-                return boardgamecoreService.getActivePlayers(url);
-            default:
-                throw new NoSiteException(site);
-        }
+    private BoardGameService getService(Site site){
+        return switch(site){
+            case BOARDGAMECORE -> boardgamecoreService;
+            case RALLY_THE_TROOPS -> rallythetroopsService;
+        };
     }
 
     private List<String> getPlayersToNotify(List<String> newActivePlayers, List<String> currentActivePlayers,
@@ -104,7 +87,7 @@ public class GameService {
         return players;
     }
 
-    private void notifyPlayers(long channelId, String url, List<String> players){
+    private void notifyPlayers(long channelId, URL url, List<String> players){
         StringBuilder message = new StringBuilder();
         boolean send = false;
         message.append("Game: ")

@@ -6,6 +6,10 @@ import com.czachodym.BoardgameBot.exception.InvalidPlayerException;
 import com.czachodym.BoardgameBot.exception.NoSiteException;
 import com.czachodym.BoardgameBot.exception.NotFoundPlayersOnSiteException;
 import com.czachodym.BoardgameBot.model.Game;
+import com.czachodym.BoardgameBot.service.sites.BoardGameService;
+import com.czachodym.BoardgameBot.service.sites.BoardgamecoreService;
+import com.czachodym.BoardgameBot.service.sites.RallythetroopsService;
+import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import net.dv8tion.jda.api.JDA;
 import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent;
@@ -15,6 +19,8 @@ import net.dv8tion.jda.api.interactions.commands.OptionType;
 import net.dv8tion.jda.api.requests.restaction.CommandCreateAction;
 import org.springframework.stereotype.Service;
 
+import java.net.MalformedURLException;
+import java.net.URL;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -24,11 +30,15 @@ import java.util.stream.Collectors;
 public class DiscordService extends ListenerAdapter {
     private final GameService gameService;
     private final JDA jda;
+    private final BoardgamecoreService boardgamecoreService;
+    private final RallythetroopsService rallythetroopsService;
 
-    public DiscordService(GameService gameService, JDA jda){
+    public DiscordService(GameService gameService, JDA jda, BoardgamecoreService boardgamecoreService, RallythetroopsService rallythetroopsService){
         this.gameService = gameService;
-
         this.jda = jda;
+        this.boardgamecoreService = boardgamecoreService;
+        this.rallythetroopsService = rallythetroopsService;
+
         jda.addEventListener(this);
         registerCommands(jda);
     }
@@ -59,29 +69,36 @@ public class DiscordService extends ListenerAdapter {
                 .queue();
     }
 
+    @SneakyThrows
     private void registerGame(SlashCommandInteractionEvent event){
         log.info("Trying to register a game.");
-        Site site = validateUrlOption(event);
-        Map<String, String> playersMapping = validatePlayerOptions(event);
-        validatePlayersOnSite(event, site, playersMapping);
+        Site site = getSite(event);
+        BoardGameService service = getService(site);
+        URL url = validateUrlOption(service, event);
+        Map<String, String> playersDiscordMapping = validatePlayerOptions(event);
+        Map<String, String> playersGameMapping = getAllPlayers(service, url);
+        validatePlayers(event, playersDiscordMapping, playersGameMapping);
         validateIfGameAlreadyExists(event);
-        String url = event.getOption("url").getAsString();
-
         Game game = Game.builder()
                 .channelId(event.getChannel().getIdLong())
                 .site(site)
                 .url(url)
-                .playersMapping(playersMapping)
+                .playersGameMapping(playersGameMapping)
+                .playersDiscordMapping(playersDiscordMapping)
                 .build();
+        log.info("{}", game);
         gameService.addGame(game);
         event.reply("Game has been registered!").queue();
         log.info("Game registered: {}", game);
     }
 
+    @SneakyThrows
     private void deleteGame(SlashCommandInteractionEvent event){
         log.info("Trying to delete a game.");
         long channelId = event.getChannel().getIdLong();
-        String url = event.getOption("url").getAsString();
+        Site site = getSite(event);
+        BoardGameService service = getService(site);
+        URL url = validateUrlOption(service, event);
         Optional<Game> game = gameService.deleteByUrl(url, channelId);
         if(game.isEmpty()){
             event.reply("No game for a given URL has been found.").queue();
@@ -91,16 +108,35 @@ public class DiscordService extends ListenerAdapter {
             log.info("Game deleted: {}", game.get());
         }
     }
-
-    private Site validateUrlOption(SlashCommandInteractionEvent event){
-        String url = event.getOption("url").getAsString();
-        if(url.toLowerCase().contains(Site.BOARDGAMECORE.toString().toLowerCase())){
+    private Site getSite(SlashCommandInteractionEvent event){
+        String urlString = event.getOption("url").getAsString();
+        if(urlString.toLowerCase().contains(Site.BOARDGAMECORE.getValue().toLowerCase())) {
             return Site.BOARDGAMECORE;
+        } else if(urlString.toLowerCase().contains(Site.RALLY_THE_TROOPS.getValue().toLowerCase())){
+            return Site.RALLY_THE_TROOPS;
         } else {
             event.reply("This site is not supported. Maybe one day...").queue();
-            throw new NoSiteException(url);
+            throw new NoSiteException(urlString);
         }
     }
+
+    private BoardGameService getService(Site site){
+        return switch(site){
+            case BOARDGAMECORE -> boardgamecoreService;
+            case RALLY_THE_TROOPS -> rallythetroopsService;
+        };
+    }
+
+    private URL validateUrlOption(BoardGameService service, SlashCommandInteractionEvent event){
+        try {
+            URL url = new URL(event.getOption("url").getAsString());
+            return service.adjustUrl(url);
+        } catch (MalformedURLException e) {
+            event.reply("Something's wrong with your URL. Double check and try again.").queue();
+            throw new RuntimeException(e);
+        }
+    }
+
 
     private Map<String, String> validatePlayerOptions(SlashCommandInteractionEvent event){
         StringBuilder reply = new StringBuilder();
@@ -121,10 +157,18 @@ public class DiscordService extends ListenerAdapter {
         return playersMapping;
     }
 
-    private void validatePlayersOnSite(SlashCommandInteractionEvent event, Site site,
-                                               Map<String, String> playersMapping){
-        String url = event.getOption("url").getAsString();
-        List<String> notFoundPlayers = gameService.validatePlayers(url, site, playersMapping);
+    private Map<String, String> getAllPlayers(BoardGameService service, URL url){
+        return service.getAllPlayers(url);
+    }
+
+    private void validatePlayers(SlashCommandInteractionEvent event, Map<String, String> playersDiscordMapping,
+                                 Map<String, String> playersGameMapping){
+        List<String> notFoundPlayers = new ArrayList<>();
+        for(String nick: new ArrayList<>(playersDiscordMapping.keySet())){
+            if(!playersGameMapping.values().contains(nick)){
+                notFoundPlayers.add(nick);
+            }
+        }
         if(notFoundPlayers.size() > 0){
             event.reply(String.join(", ", notFoundPlayers) + " - these players could not be found. " +
                     "Probably you provided wrong names. Game has not been registered.").queue();
@@ -139,8 +183,9 @@ public class DiscordService extends ListenerAdapter {
         event.reply("Supported sites: " + values).queue();
     }
 
+    @SneakyThrows
     private void validateIfGameAlreadyExists(SlashCommandInteractionEvent event){
-        String url = event.getOption("url").getAsString();
+        URL url = new URL(event.getOption("url").getAsString());
         long channelId = event.getChannel().getIdLong();
         Optional<Game> game = gameService.getByUrlAndChannelId(url, channelId);
         if(game.isPresent()){

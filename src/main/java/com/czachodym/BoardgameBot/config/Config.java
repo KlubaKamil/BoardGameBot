@@ -46,7 +46,7 @@ public class Config {
             checkGamesServiceResult = checkGamesService.schedule(runnable, 20, TimeUnit.SECONDS);
         };
         checkGamesServiceResult = checkGamesService.schedule(runnable, 20, TimeUnit.SECONDS);
-        log.info("Started runCheckGamesService");
+        log.info("runCheckGamesService started.");
     }
 
     @PreDestroy
